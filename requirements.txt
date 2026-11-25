@@ -1,7 +1,6 @@
 torch>=2.2
-torchvision>=0.17
 pillow>=10.0
 numpy>=1.24
 matplotlib>=3.7
-scikit-learn>=1.3   # usado apenas no baseline (PCA + k-means)
+scikit-learn>=1.3   # baseline (PCA + k-means), metricas e inicializacao do DEC
 pytest>=7.0         # testes

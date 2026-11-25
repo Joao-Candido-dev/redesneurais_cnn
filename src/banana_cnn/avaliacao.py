@@ -1,4 +1,17 @@
-"""Metricas de avaliacao: acuracia, matriz de confusao, precisao, revocacao e F1."""
+"""Avaliacao dos grupos encontrados SEM rotulos.
+
+Os rotulos (nomes das pastas) entram SOMENTE aqui, depois do treino, para
+responder: "os grupos que a rede descobriu sozinha batem com o que um humano
+chamaria de banana boa e banana impropria?"
+
+Metricas:
+- Acuracia de agrupamento: os numeros dos grupos sao arbitrarios (o grupo 0
+  pode ser "impropria"), entao testamos a melhor correspondencia grupo->rotulo
+  (algoritmo hungaro) antes de contar acertos.
+- NMI (informacao mutua normalizada): 0 = grupos sem relacao com os rotulos,
+  1 = grupos identicos aos rotulos.
+- ARI (indice de Rand ajustado): 0 = equivalente ao acaso, 1 = perfeito.
+"""
 
 from __future__ import annotations
 
@@ -6,75 +19,100 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+from scipy.optimize import linear_sum_assignment
+from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 from torch import nn
 from torch.utils.data import DataLoader
 
-
-@dataclass
-class ResultadoAvaliacao:
-    acuracia: float
-    matriz_confusao: np.ndarray  # linhas = classe real, colunas = classe prevista
-    por_classe: dict[str, dict[str, float]]
-
-    def como_texto(self, classes: list[str]) -> str:
-        linhas = [f"Acuracia geral: {self.acuracia:.2%}", "", "Por classe:"]
-        for classe in classes:
-            m = self.por_classe[classe]
-            linhas.append(
-                f"  {classe:<12} precisao={m['precisao']:.2%}  "
-                f"revocacao={m['revocacao']:.2%}  f1={m['f1']:.2%}  (n={int(m['suporte'])})"
-            )
-        linhas += ["", "Matriz de confusao (linha = real, coluna = prevista):"]
-        cabecalho = " " * 14 + "".join(f"{c[:10]:>12}" for c in classes)
-        linhas.append(cabecalho)
-        for i, classe in enumerate(classes):
-            valores = "".join(f"{v:>12d}" for v in self.matriz_confusao[i])
-            linhas.append(f"  {classe[:10]:<12}{valores}")
-        return "\n".join(linhas)
+from .modelo import AutoencoderConv, ModeloDEC
 
 
 @torch.no_grad()
-def coletar_previsoes(
-    modelo: nn.Module, loader: DataLoader, dispositivo: torch.device
-) -> tuple[np.ndarray, np.ndarray]:
+def extrair_latentes(autoencoder: AutoencoderConv, loader: DataLoader,
+                     dispositivo: torch.device) -> np.ndarray:
+    """Vetor z (espaco latente) de cada foto, na ordem do loader."""
+    autoencoder.eval()
+    return np.concatenate([autoencoder.codificar(x.to(dispositivo)).cpu().numpy() for x, _ in loader])
+
+
+@torch.no_grad()
+def extrair_atribuicoes(modelo: ModeloDEC, loader: DataLoader, dispositivo: torch.device) -> np.ndarray:
+    """Matriz Q (N x k): probabilidade de cada foto pertencer a cada grupo."""
     modelo.eval()
-    reais, previstos = [], []
-    for imagens, rotulos in loader:
-        logits = modelo(imagens.to(dispositivo))
-        previstos.append(logits.argmax(dim=1).cpu().numpy())
-        reais.append(rotulos.numpy())
-    return np.concatenate(reais), np.concatenate(previstos)
+    return np.concatenate([modelo(x.to(dispositivo))[0].cpu().numpy() for x, _ in loader])
 
 
-def calcular_metricas(
-    reais: np.ndarray, previstos: np.ndarray, classes: list[str]
-) -> ResultadoAvaliacao:
-    n = len(classes)
-    matriz = np.zeros((n, n), dtype=int)
-    for r, p in zip(reais, previstos):
-        matriz[r, p] += 1
-
-    por_classe = {}
-    for i, classe in enumerate(classes):
-        verdadeiro_positivo = matriz[i, i]
-        previstos_como_classe = matriz[:, i].sum()
-        reais_da_classe = matriz[i, :].sum()
-        precisao = verdadeiro_positivo / previstos_como_classe if previstos_como_classe else 0.0
-        revocacao = verdadeiro_positivo / reais_da_classe if reais_da_classe else 0.0
-        f1 = (2 * precisao * revocacao / (precisao + revocacao)) if (precisao + revocacao) else 0.0
-        por_classe[classe] = {
-            "precisao": float(precisao),
-            "revocacao": float(revocacao),
-            "f1": float(f1),
-            "suporte": float(reais_da_classe),
-        }
-
-    acuracia = float(np.trace(matriz) / matriz.sum()) if matriz.sum() else 0.0
-    return ResultadoAvaliacao(acuracia, matriz, por_classe)
+@torch.no_grad()
+def perda_reconstrucao(autoencoder: AutoencoderConv, loader: DataLoader,
+                       dispositivo: torch.device) -> float:
+    autoencoder.eval()
+    criterio = nn.MSELoss(reduction="sum")
+    soma, total = 0.0, 0
+    for x, _ in loader:
+        x = x.to(dispositivo)
+        soma += criterio(autoencoder(x)[0], x).item()
+        total += x.numel()
+    return soma / total
 
 
-def avaliar_modelo(
-    modelo: nn.Module, loader: DataLoader, dispositivo: torch.device, classes: list[str]
-) -> ResultadoAvaliacao:
-    reais, previstos = coletar_previsoes(modelo, loader, dispositivo)
-    return calcular_metricas(reais, previstos, classes)
+@dataclass
+class ResultadoAgrupamento:
+    acuracia: float
+    nmi: float
+    ari: float
+    matriz: np.ndarray            # linhas = rotulo de referencia, colunas = grupo
+    grupo_para_rotulo: dict[int, int]
+    tamanho_grupos: list[int]
+    avaliadas: int                # fotos com rotulo de referencia
+
+    def como_texto(self, rotulos: list[str]) -> str:
+        linhas = [
+            f"Fotos avaliadas (com pasta de referencia): {self.avaliadas}",
+            f"Tamanho de cada grupo: {self.tamanho_grupos}",
+            f"Acuracia de agrupamento: {self.acuracia:.2%}",
+            f"NMI: {self.nmi:.3f}   ARI: {self.ari:.3f}",
+            "",
+            "Correspondencia encontrada (grupo -> pasta mais parecida):",
+        ]
+        for g, r in sorted(self.grupo_para_rotulo.items()):
+            linhas.append(f"  grupo {g} -> {rotulos[r] if r >= 0 else '?'}")
+        linhas += ["", "Tabela (linha = pasta real, coluna = grupo descoberto):"]
+        linhas.append(" " * 14 + "".join(f"{'grupo ' + str(g):>10}" for g in range(self.matriz.shape[1])))
+        for i, nome in enumerate(rotulos):
+            linhas.append(f"  {nome[:10]:<12}" + "".join(f"{v:>10d}" for v in self.matriz[i]))
+        return "\n".join(linhas)
+
+
+def avaliar_agrupamento(rotulos_ref: np.ndarray, grupos: np.ndarray, num_rotulos: int,
+                        num_grupos: int) -> ResultadoAgrupamento:
+    """Compara os grupos descobertos com as pastas (ignora fotos sem_rotulo)."""
+    tamanhos = np.bincount(grupos, minlength=num_grupos).tolist()
+    mascara = rotulos_ref >= 0
+    reais, previstos = rotulos_ref[mascara], grupos[mascara]
+    matriz = np.zeros((num_rotulos, num_grupos), dtype=int)
+    for r, g in zip(reais, previstos):
+        matriz[r, g] += 1
+
+    if mascara.sum() == 0 or num_rotulos == 0:
+        return ResultadoAgrupamento(float("nan"), float("nan"), float("nan"), matriz,
+                                    {g: -1 for g in range(num_grupos)}, tamanhos, 0)
+
+    # Algoritmo hungaro: escolhe a correspondencia grupo<->rotulo com mais acertos.
+    linhas, colunas = linear_sum_assignment(-matriz)
+    acertos = matriz[linhas, colunas].sum()
+    mapa = {int(c): int(r) for r, c in zip(linhas, colunas)}
+    # Grupos que sobraram (k > numero de pastas) recebem o rotulo majoritario.
+    for g in range(num_grupos):
+        if g not in mapa:
+            mapa[g] = int(matriz[:, g].argmax()) if matriz[:, g].sum() else -1
+            acertos += matriz[mapa[g], g] if mapa[g] >= 0 else 0
+
+    return ResultadoAgrupamento(
+        acuracia=float(acertos / mascara.sum()),
+        nmi=float(normalized_mutual_info_score(reais, previstos)),
+        ari=float(adjusted_rand_score(reais, previstos)),
+        matriz=matriz,
+        grupo_para_rotulo=mapa,
+        tamanho_grupos=tamanhos,
+        avaliadas=int(mascara.sum()),
+    )

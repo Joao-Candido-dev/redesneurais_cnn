@@ -12,19 +12,10 @@ from pathlib import Path
 # Raiz do projeto: src/banana_cnn/config.py -> sobe dois niveis.
 RAIZ_PROJETO = Path(__file__).resolve().parents[2]
 
-# Arquiteturas suportadas pela fabrica de modelos (ver modelo.py).
-ARQUITETURA_PROPRIA = "cnn_propria"
-ARQUITETURA_MOBILENET = "mobilenet"
-ARQUITETURAS_SUPORTADAS = (ARQUITETURA_PROPRIA, ARQUITETURA_MOBILENET)
-
-# Nome da pasta que representa a classe "boa para consumo".
-CLASSE_BOA = "boa"
-
-# Texto exibido ao usuario para cada classe conhecida.
-VEREDITOS = {
-    "boa": "Boa para consumo",
-    "impropria": "Nao recomendada para consumo",
-}
+# Pasta para fotos sem nenhuma etiqueta. Fotos em qualquer outra subpasta de
+# dados/imagens tambem sao usadas no treino SEM o nome da pasta; o nome so
+# serve, no final, para medir se os grupos encontrados fazem sentido.
+PASTA_SEM_ROTULO = "sem_rotulo"
 
 
 @dataclass(frozen=True)
@@ -36,12 +27,24 @@ class ConfigCaminhos:
     relatorios: Path = RAIZ_PROJETO / "relatorios"
 
     @property
-    def checkpoint(self) -> Path:
-        return self.modelos / "melhor_modelo.pt"
+    def autoencoder(self) -> Path:
+        return self.modelos / "autoencoder.pt"
 
     @property
-    def historico(self) -> Path:
-        return self.relatorios / "historico_treino.csv"
+    def dec(self) -> Path:
+        return self.modelos / "dec.pt"
+
+    @property
+    def cache(self) -> Path:
+        return self.modelos / "cache_imagens.pt"
+
+    @property
+    def historico_autoencoder(self) -> Path:
+        return self.relatorios / "historico_autoencoder.csv"
+
+    @property
+    def historico_dec(self) -> Path:
+        return self.relatorios / "historico_dec.csv"
 
     def criar_pastas(self) -> None:
         for pasta in (self.dados, self.modelos, self.relatorios):
@@ -50,25 +53,37 @@ class ConfigCaminhos:
 
 @dataclass
 class ConfigTreino:
-    """Hiperparametros de treinamento e inferencia."""
+    """Hiperparametros do autoencoder e do agrupamento profundo (DEC)."""
 
-    arquitetura: str = ARQUITETURA_PROPRIA
-    tamanho_imagem: int = 160
-    tamanho_lote: int = 16
-    epocas: int = 30
+    # --- Dados ---
+    tamanho_imagem: int = 96          # precisa ser multiplo de 16 (4 reducoes pela metade)
+    fracao_validacao: float = 0.2
+    min_imagens: int = 20
 
-    # Taxa de aprendizado do primeiro treino e taxa menor usada quando o
-    # modelo ja treinado recebe fotos novas (ajuste fino sem "esquecer" tudo).
+    # --- Autoencoder (familia a) ---
+    dimensao_latente: int = 32        # tamanho do "resumo" de cada foto
+    canais: tuple[int, ...] = (32, 64, 128, 256)
+    tamanho_lote: int = 64
+    epocas: int = 40
     taxa_aprendizado: float = 1e-3
     taxa_aprendizado_continuacao: float = 3e-4
-    decaimento_pesos: float = 1e-4
+    decaimento_pesos: float = 1e-5
+    paciencia_early_stopping: int = 6
+    # Desvio do ruido gaussiano somado a entrada (0 = autoencoder comum,
+    # > 0 = denoising autoencoder: a rede recebe a foto suja e reconstroi a limpa).
+    ruido: float = 0.0
 
-    fracao_validacao: float = 0.2
-    paciencia_early_stopping: int = 7
-    min_imagens_por_classe: int = 10
-
-    # Abaixo dessa confianca a previsao e marcada como "incerta".
-    limiar_confianca: float = 0.6
+    # --- Deep Embedded Clustering (familia b) ---
+    num_grupos: int = 2
+    epocas_dec: int = 30
+    taxa_aprendizado_dec: float = 1e-4
+    # Peso da perda de reconstrucao durante o DEC (IDEC, Guo et al. 2017).
+    # Mantem o espaco latente fiel as fotos enquanto os grupos se formam.
+    peso_reconstrucao_dec: float = 1.0
+    # Para quando menos dessa fracao de fotos troca de grupo entre epocas.
+    tolerancia_dec: float = 0.001
+    # Grau de liberdade da distribuicao t de Student usada no DEC.
+    alfa_dec: float = 1.0
 
     semente: int = 42
     # 0 evita problemas de multiprocessamento no Windows.

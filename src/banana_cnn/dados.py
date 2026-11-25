@@ -1,10 +1,14 @@
-"""Camada de dados: descoberta das fotos, divisao treino/validacao e transformacoes.
+"""Camada de dados: descoberta das fotos, divisao treino/validacao e cache.
 
-Organizacao esperada das fotos (o nome da pasta e o rotulo da classe):
+IMPORTANTE (aprendizado nao supervisionado): a rede recebe SOMENTE os pixels.
+O nome da pasta onde a foto esta (ex.: boa/, impropria/) nunca entra no
+treinamento. Ele e guardado a parte apenas para, no final, medir se os
+grupos que a rede descobriu sozinha coincidem com o que um humano diria.
 
     dados/imagens/
-        boa/        -> bananas boas para consumo
-        impropria/  -> bananas estragadas, podres ou mofadas
+        boa/         -> usado so na avaliacao final
+        impropria/   -> usado so na avaliacao final
+        sem_rotulo/  -> fotos sem nenhuma etiqueta (tambem entram no treino)
 """
 
 from __future__ import annotations
@@ -15,27 +19,23 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 from PIL import Image, ImageOps
 from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms
 
-from .config import ConfigCaminhos, ConfigTreino
+from .config import PASTA_SEM_ROTULO, ConfigCaminhos, ConfigTreino
 
 logger = logging.getLogger(__name__)
 
 EXTENSOES_VALIDAS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-
-# Media e desvio padrao do ImageNet: padrao para normalizar imagens RGB
-# e obrigatorio quando usamos pesos pre-treinados (MobileNet).
-MEDIA_RGB = (0.485, 0.456, 0.406)
-DESVIO_RGB = (0.229, 0.224, 0.225)
+SEM_ROTULO = -1
 
 
 @dataclass(frozen=True)
 class Amostra:
     caminho: Path
-    rotulo: int
+    rotulo_referencia: int  # -1 = sem rotulo. NUNCA e usado no treino.
 
 
 class DadosInsuficientesError(RuntimeError):
@@ -52,6 +52,17 @@ def carregar_imagem(caminho: Path) -> Image.Image:
         return imagem.convert("RGB")
 
 
+def imagem_para_tensor(imagem: Image.Image, tamanho: int) -> torch.Tensor:
+    """PIL -> tensor uint8 (3, tamanho, tamanho)."""
+    redimensionada = imagem.resize((tamanho, tamanho), Image.Resampling.BILINEAR)
+    return torch.from_numpy(np.asarray(redimensionada, dtype=np.uint8).copy()).permute(2, 0, 1)
+
+
+def carregar_tensor(caminho: Path, tamanho: int) -> torch.Tensor:
+    """Foto do disco -> tensor float (3, tamanho, tamanho) com valores em [0, 1]."""
+    return imagem_para_tensor(carregar_imagem(caminho), tamanho).float() / 255.0
+
+
 def eh_imagem(caminho: Path) -> bool:
     return caminho.is_file() and caminho.suffix.lower() in EXTENSOES_VALIDAS
 
@@ -61,36 +72,36 @@ def hash_arquivo(caminho: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Descoberta das classes e divisao treino/validacao
+# Descoberta das fotos
 # ---------------------------------------------------------------------------
-def descobrir_classes(pasta_dados: Path) -> list[str]:
-    """Cada subpasta de dados/imagens vira uma classe (ordem alfabetica)."""
-    classes = sorted(
-        p.name for p in pasta_dados.iterdir() if p.is_dir() and not p.name.startswith(".")
+def descobrir_rotulos_referencia(pasta_dados: Path) -> list[str]:
+    """Nomes das subpastas (exceto sem_rotulo). Usados SO na avaliacao."""
+    if not pasta_dados.exists():
+        return []
+    return sorted(
+        p.name for p in pasta_dados.iterdir()
+        if p.is_dir() and not p.name.startswith(".") and p.name != PASTA_SEM_ROTULO
     )
-    if len(classes) < 2:
-        raise DadosInsuficientesError(
-            f"Sao necessarias pelo menos 2 pastas de classe em {pasta_dados}."
-        )
-    return classes
 
 
-def listar_amostras(pasta_dados: Path, classes: list[str]) -> list[Amostra]:
-    amostras: list[Amostra] = []
-    for indice, classe in enumerate(classes):
-        for arquivo in sorted((pasta_dados / classe).iterdir()):
-            if eh_imagem(arquivo):
-                amostras.append(Amostra(arquivo, indice))
+def listar_amostras(pasta_dados: Path, rotulos: list[str]) -> list[Amostra]:
+    """Todas as fotos dentro de dados/imagens (inclusive subpastas)."""
+    indice = {nome: i for i, nome in enumerate(rotulos)}
+    amostras = []
+    for arquivo in sorted(pasta_dados.rglob("*")):
+        if not eh_imagem(arquivo):
+            continue
+        partes = arquivo.relative_to(pasta_dados).parts
+        rotulo = indice.get(partes[0], SEM_ROTULO) if len(partes) > 1 else SEM_ROTULO
+        amostras.append(Amostra(arquivo, rotulo))
     return amostras
 
 
 def pertence_validacao(caminho: Path, fracao_validacao: float) -> bool:
     """Decide de forma DETERMINISTICA se uma foto vai para a validacao.
 
-    O sorteio e feito pelo hash do conteudo do arquivo. Assim, quando voce
-    adicionar fotos novas e treinar de novo, as fotos antigas continuam no
-    mesmo grupo. Isso impede que uma foto usada no treino de ontem "vaze"
-    para a validacao de hoje, o que deixaria a acuracia falsamente alta.
+    O sorteio e feito pelo hash do conteudo do arquivo: ao adicionar fotos
+    novas, as antigas continuam no mesmo grupo e a validacao segue honesta.
     """
     valor = int(hash_arquivo(caminho)[:8], 16) / 0xFFFFFFFF
     return valor < fracao_validacao
@@ -106,137 +117,113 @@ def dividir_treino_validacao(
     return treino, validacao
 
 
-def contar_por_classe(amostras: list[Amostra], classes: list[str]) -> dict[str, int]:
-    contagem = Counter(a.rotulo for a in amostras)
-    return {classe: contagem.get(i, 0) for i, classe in enumerate(classes)}
-
-
-def validar_quantidade(
-    amostras: list[Amostra], classes: list[str], minimo_por_classe: int
-) -> None:
-    faltando = {
-        classe: qtd
-        for classe, qtd in contar_por_classe(amostras, classes).items()
-        if qtd < minimo_por_classe
-    }
-    if faltando:
-        detalhes = ", ".join(f"{c}: {q}" for c, q in faltando.items())
-        raise DadosInsuficientesError(
-            f"Cada classe precisa de pelo menos {minimo_por_classe} fotos. "
-            f"Atualmente: {detalhes}."
-        )
+def contar_por_rotulo(amostras: list[Amostra], rotulos: list[str]) -> dict[str, int]:
+    contagem = Counter(a.rotulo_referencia for a in amostras)
+    resumo = {nome: contagem.get(i, 0) for i, nome in enumerate(rotulos)}
+    if contagem.get(SEM_ROTULO):
+        resumo[PASTA_SEM_ROTULO] = contagem[SEM_ROTULO]
+    return resumo
 
 
 # ---------------------------------------------------------------------------
-# Transformacoes (pre-processamento e aumento de dados)
+# Cache: decodificar milhares de JPGs a cada comando e lento. As fotos ja
+# redimensionadas ficam guardadas em um unico arquivo (uint8, ~27 KB por foto).
 # ---------------------------------------------------------------------------
-def transformacoes_treino(tamanho: int) -> transforms.Compose:
-    """Aumento de dados: gera variacoes de cada foto a cada epoca.
-
-    Com poucas fotos a rede tende a decorar o conjunto (overfitting). Girar,
-    espelhar e recortar levemente a imagem ensina a rede que a posicao da
-    banana nao importa. O brilho e o contraste variam pouco e a MATIZ (hue)
-    nao e alterada de proposito: a cor (amarelo, verde, marrom, preto) e o
-    principal sinal de que a banana esta boa ou nao.
-    """
-    return transforms.Compose(
-        [
-            transforms.Resize((tamanho, tamanho)),
-            transforms.RandomResizedCrop(tamanho, scale=(0.75, 1.0), ratio=(0.9, 1.1)),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(),
-            transforms.RandomRotation(20),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
-            transforms.ToTensor(),
-            transforms.Normalize(MEDIA_RGB, DESVIO_RGB),
-        ]
-    )
+def _chave_cache(amostras: list[Amostra], tamanho: int) -> str:
+    h = hashlib.md5(str(tamanho).encode())
+    for a in amostras:
+        estado = a.caminho.stat()
+        h.update(f"{a.caminho}|{estado.st_size}|{estado.st_mtime_ns}".encode())
+    return h.hexdigest()
 
 
-def transformacoes_avaliacao(tamanho: int) -> transforms.Compose:
-    """Sem aleatoriedade: a mesma foto sempre gera a mesma entrada."""
-    return transforms.Compose(
-        [
-            transforms.Resize((tamanho, tamanho)),
-            transforms.ToTensor(),
-            transforms.Normalize(MEDIA_RGB, DESVIO_RGB),
-        ]
-    )
+def carregar_tensores(amostras: list[Amostra], tamanho: int, arquivo_cache: Path) -> torch.Tensor:
+    """Tensor uint8 (N, 3, tamanho, tamanho) com todas as fotos."""
+    chave = _chave_cache(amostras, tamanho)
+    if arquivo_cache.exists():
+        conteudo = torch.load(arquivo_cache, weights_only=True)
+        if conteudo.get("chave") == chave:
+            return conteudo["imagens"]
+
+    logger.info("Lendo e redimensionando %d fotos (so na primeira vez)...", len(amostras))
+    imagens = torch.empty((len(amostras), 3, tamanho, tamanho), dtype=torch.uint8)
+    for i, amostra in enumerate(amostras):
+        imagens[i] = imagem_para_tensor(carregar_imagem(amostra.caminho), tamanho)
+    arquivo_cache.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"chave": chave, "imagens": imagens}, arquivo_cache)
+    return imagens
 
 
 # ---------------------------------------------------------------------------
 # Dataset e DataLoaders
 # ---------------------------------------------------------------------------
-class DatasetBananas(Dataset):
-    def __init__(self, amostras: list[Amostra], transformacao: transforms.Compose) -> None:
-        self.amostras = amostras
-        self.transformacao = transformacao
+class DatasetImagens(Dataset):
+    """Devolve (imagem, indice). Nao devolve rotulo: a rede nao ve rotulos.
+
+    O aumento de dados e so espelhamento. A cor nao e alterada de proposito:
+    ela e o principal sinal visual de banana madura ou estragada.
+    """
+
+    def __init__(self, imagens: torch.Tensor, aumentar: bool = False) -> None:
+        self.imagens = imagens
+        self.aumentar = aumentar
 
     def __len__(self) -> int:
-        return len(self.amostras)
+        return len(self.imagens)
 
     def __getitem__(self, indice: int) -> tuple[torch.Tensor, int]:
-        amostra = self.amostras[indice]
-        imagem = carregar_imagem(amostra.caminho)
-        return self.transformacao(imagem), amostra.rotulo
+        x = self.imagens[indice].float() / 255.0
+        if self.aumentar:
+            if torch.rand(1).item() < 0.5:
+                x = x.flip(2)
+            if torch.rand(1).item() < 0.5:
+                x = x.flip(1)
+        return x, indice
 
 
 @dataclass
 class PacoteDados:
-    """Tudo que o treinamento precisa sobre os dados."""
+    """Tudo que o treinamento e a avaliacao precisam sobre os dados."""
 
-    loader_treino: DataLoader
-    loader_validacao: DataLoader
-    classes: list[str]
-    pesos_classes: torch.Tensor
-    qtd_treino: int
-    qtd_validacao: int
+    amostras: list[Amostra]
+    imagens: torch.Tensor            # uint8 (N, 3, H, W), todas as fotos
+    indices_treino: list[int]
+    indices_validacao: list[int]
+    rotulos_referencia: list[str]    # nomes das pastas (so para avaliacao)
 
+    @property
+    def rotulos_array(self) -> np.ndarray:
+        return np.array([a.rotulo_referencia for a in self.amostras])
 
-def calcular_pesos_classes(amostras: list[Amostra], num_classes: int) -> torch.Tensor:
-    """Peso maior para a classe com menos fotos (compensa desbalanceamento).
-
-    Formula: total / (num_classes * quantidade_da_classe).
-    """
-    contagem = Counter(a.rotulo for a in amostras)
-    total = len(amostras)
-    pesos = [total / (num_classes * max(contagem.get(i, 0), 1)) for i in range(num_classes)]
-    return torch.tensor(pesos, dtype=torch.float32)
+    def loader(self, indices: list[int] | None, cfg: ConfigTreino,
+               embaralhar: bool = False, aumentar: bool = False) -> DataLoader:
+        imagens = self.imagens if indices is None else self.imagens[indices]
+        return DataLoader(
+            DatasetImagens(imagens, aumentar=aumentar),
+            batch_size=cfg.tamanho_lote,
+            shuffle=embaralhar,
+            num_workers=cfg.num_workers,
+        )
 
 
 def preparar_dados(caminhos: ConfigCaminhos, cfg: ConfigTreino) -> PacoteDados:
-    classes = descobrir_classes(caminhos.dados)
-    amostras = listar_amostras(caminhos.dados, classes)
-    validar_quantidade(amostras, classes, cfg.min_imagens_por_classe)
+    if cfg.tamanho_imagem % 16:
+        raise ValueError("tamanho_imagem precisa ser multiplo de 16.")
+    rotulos = descobrir_rotulos_referencia(caminhos.dados)
+    amostras = listar_amostras(caminhos.dados, rotulos)
+    if len(amostras) < cfg.min_imagens:
+        raise DadosInsuficientesError(
+            f"Sao necessarias pelo menos {cfg.min_imagens} fotos em {caminhos.dados} "
+            f"(encontradas: {len(amostras)})."
+        )
 
     treino, validacao = dividir_treino_validacao(amostras, cfg.fracao_validacao)
-    if not validacao:
-        raise DadosInsuficientesError("Nenhuma foto caiu na validacao. Adicione mais fotos.")
+    if not validacao or not treino:
+        raise DadosInsuficientesError("Fotos insuficientes para separar treino e validacao.")
+    em_validacao = {a.caminho for a in validacao}
+    indices_treino = [i for i, a in enumerate(amostras) if a.caminho not in em_validacao]
+    indices_validacao = [i for i, a in enumerate(amostras) if a.caminho in em_validacao]
 
-    logger.info("Classes: %s", classes)
-    logger.info("Treino: %s", contar_por_classe(treino, classes))
-    logger.info("Validacao: %s", contar_por_classe(validacao, classes))
-    for classe, qtd in contar_por_classe(validacao, classes).items():
-        if qtd == 0:
-            logger.warning("A classe '%s' nao tem fotos na validacao ainda.", classe)
-
-    loader_treino = DataLoader(
-        DatasetBananas(treino, transformacoes_treino(cfg.tamanho_imagem)),
-        batch_size=cfg.tamanho_lote,
-        shuffle=True,
-        num_workers=cfg.num_workers,
-    )
-    loader_validacao = DataLoader(
-        DatasetBananas(validacao, transformacoes_avaliacao(cfg.tamanho_imagem)),
-        batch_size=cfg.tamanho_lote,
-        shuffle=False,
-        num_workers=cfg.num_workers,
-    )
-    return PacoteDados(
-        loader_treino=loader_treino,
-        loader_validacao=loader_validacao,
-        classes=classes,
-        pesos_classes=calcular_pesos_classes(treino, len(classes)),
-        qtd_treino=len(treino),
-        qtd_validacao=len(validacao),
-    )
+    logger.info("Fotos: %d no treino, %d na validacao", len(treino), len(validacao))
+    imagens = carregar_tensores(amostras, cfg.tamanho_imagem, caminhos.cache)
+    return PacoteDados(amostras, imagens, indices_treino, indices_validacao, rotulos)

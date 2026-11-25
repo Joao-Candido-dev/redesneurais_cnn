@@ -1,45 +1,17 @@
-"""Persistencia do modelo: salvar e carregar o "cerebro" treinado."""
+"""Persistencia: salvar e carregar o autoencoder e o modelo DEC."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
-from torch import nn
 
-from .modelo import criar_modelo
-
-
-@dataclass
-class ModeloCarregado:
-    modelo: nn.Module
-    classes: list[str]
-    arquitetura: str
-    tamanho_imagem: int
-    epocas_totais: int
-    metricas: dict[str, float]
+from .modelo import AutoencoderConv, ModeloDEC
 
 
-def salvar_checkpoint(
-    caminho: Path,
-    modelo: nn.Module,
-    classes: list[str],
-    arquitetura: str,
-    tamanho_imagem: int,
-    epocas_totais: int,
-    metricas: dict[str, float],
-) -> None:
+def _gravar(caminho: Path, conteudo: dict[str, Any]) -> None:
     caminho.parent.mkdir(parents=True, exist_ok=True)
-    conteudo: dict[str, Any] = {
-        "estado_modelo": modelo.state_dict(),
-        "classes": classes,
-        "arquitetura": arquitetura,
-        "tamanho_imagem": tamanho_imagem,
-        "epocas_totais": epocas_totais,
-        "metricas": metricas,
-    }
     # Grava em arquivo temporario e depois renomeia: se o programa for
     # interrompido no meio, o modelo anterior nao fica corrompido.
     temporario = caminho.with_suffix(".tmp")
@@ -47,22 +19,44 @@ def salvar_checkpoint(
     temporario.replace(caminho)
 
 
-def carregar_checkpoint(caminho: Path, dispositivo: torch.device) -> ModeloCarregado:
+def _ler(caminho: Path, dispositivo: torch.device, comando: str) -> dict[str, Any]:
     if not caminho.exists():
-        raise FileNotFoundError(
-            f"Nenhum modelo treinado em {caminho}. Rode primeiro: python main.py treinar"
-        )
-    conteudo = torch.load(caminho, map_location=dispositivo, weights_only=True)
-    modelo = criar_modelo(
-        conteudo["arquitetura"], len(conteudo["classes"]), pretreinado=False
-    )
-    modelo.load_state_dict(conteudo["estado_modelo"])
-    modelo.to(dispositivo)
-    return ModeloCarregado(
-        modelo=modelo,
-        classes=list(conteudo["classes"]),
-        arquitetura=conteudo["arquitetura"],
-        tamanho_imagem=int(conteudo["tamanho_imagem"]),
-        epocas_totais=int(conteudo["epocas_totais"]),
-        metricas=dict(conteudo["metricas"]),
-    )
+        raise FileNotFoundError(f"Modelo nao encontrado em {caminho}. Rode antes: python main.py {comando}")
+    return torch.load(caminho, map_location=dispositivo, weights_only=True)
+
+
+def salvar_autoencoder(caminho: Path, modelo: AutoencoderConv, epocas_totais: int,
+                       metricas: dict[str, float]) -> None:
+    _gravar(caminho, {
+        "estado": modelo.state_dict(),
+        "hiperparametros": modelo.hiperparametros(),
+        "epocas_totais": epocas_totais,
+        "metricas": metricas,
+    })
+
+
+def carregar_autoencoder(caminho: Path, dispositivo: torch.device) -> tuple[AutoencoderConv, dict]:
+    conteudo = _ler(caminho, dispositivo, "treinar")
+    hp = conteudo["hiperparametros"]
+    modelo = AutoencoderConv(hp["tamanho_imagem"], hp["dimensao_latente"], tuple(hp["canais"]))
+    modelo.load_state_dict(conteudo["estado"])
+    return modelo.to(dispositivo), conteudo
+
+
+def salvar_dec(caminho: Path, modelo: ModeloDEC, metricas: dict[str, Any]) -> None:
+    _gravar(caminho, {
+        "estado": modelo.state_dict(),
+        "hiperparametros": modelo.autoencoder.hiperparametros(),
+        "num_grupos": modelo.num_grupos,
+        "alfa": modelo.agrupamento.alfa,
+        "metricas": metricas,
+    })
+
+
+def carregar_dec(caminho: Path, dispositivo: torch.device) -> tuple[ModeloDEC, dict]:
+    conteudo = _ler(caminho, dispositivo, "agrupar")
+    hp = conteudo["hiperparametros"]
+    autoencoder = AutoencoderConv(hp["tamanho_imagem"], hp["dimensao_latente"], tuple(hp["canais"]))
+    modelo = ModeloDEC(autoencoder, int(conteudo["num_grupos"]), float(conteudo["alfa"]))
+    modelo.load_state_dict(conteudo["estado"])
+    return modelo.to(dispositivo), conteudo
