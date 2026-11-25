@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Fotos, modelos e relatorios sao gerados localmente
+dados/imagens/*/*
+!dados/imagens/*/.gitkeep
+modelos/*
+!modelos/.gitkeep
+relatorios/*
+!relatorios/.gitkeep
