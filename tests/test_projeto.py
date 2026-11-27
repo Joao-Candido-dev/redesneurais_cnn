@@ -65,6 +65,19 @@ def test_fotos_sem_pasta_ficam_sem_rotulo(tmp_path):
     assert rotulos == {"a.png": 0, "b.png": SEM_ROTULO, "c.png": SEM_ROTULO}
 
 
+def test_detecta_copias_giradas_com_cantos_pretos():
+    from banana_cnn.dados import tem_cantos_pretos
+
+    normal = torch.full((1, 3, 32, 32), 200, dtype=torch.uint8)
+    girada = normal.clone()
+    for i in range(10):  # triangulos pretos nos 4 cantos
+        girada[..., i, : 10 - i] = 0
+        girada[..., i, 22 + i:] = 0
+        girada[..., 31 - i, : 10 - i] = 0
+        girada[..., 31 - i, 22 + i:] = 0
+    assert tem_cantos_pretos(torch.cat([normal, girada])).tolist() == [False, True]
+
+
 def test_importacao_reconhece_pastas_do_kaggle():
     assert classificar_pasta("freshbanana") == "boa"
     assert classificar_pasta("rottenbanana") == "impropria"

@@ -134,6 +134,16 @@ python main.py info
 
 As pastas `freshbanana` vão para `boa/` e as `rottenbanana` vão para `impropria/`. Fotos sem classificação podem ir para `dados/imagens/sem_rotulo/`.
 
+> **Cópias giradas do dataset:** cerca de 2/3 das fotos do Kaggle são cópias giradas artificialmente, com triângulos pretos nos cantos. No primeiro treino, a rede agrupou as fotos por "tem canto preto ou não" e a acurácia ficou no nível do acaso (as figuras desse treino estão em `relatorios/antes_filtro/`). Por isso essas cópias são ignoradas na leitura (`ignorar_cantos_pretos` em `config.py`, função `tem_cantos_pretos` em `dados.py`). Nenhum arquivo é apagado.
+
+**Resultado obtido** (1.582 fotos originais, `python main.py avaliar`):
+
+| Método | Acurácia | NMI | ARI |
+|---|---|---|---|
+| PCA + k-means nos pixels (baseline) | 59,3% | 0,074 | 0,029 |
+| Autoencoder + k-means no latente | 53,8% | 0,033 | −0,002 |
+| Autoencoder + DEC | **68,8%** | **0,136** | **0,140** |
+
 ### 3. Treinar e analisar
 
 ```powershell

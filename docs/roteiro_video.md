@@ -6,7 +6,7 @@ Como usar este roteiro:
 - As falas são **pontos-chave**, não um texto para decorar. Cada um deve explicar com as próprias palavras. A rubrica avalia se o grupo domina o conteúdo, e o enunciado avisa sobre conteúdo gerado automaticamente.
 - Não gastem tempo explicando a diferença entre supervisionado e não supervisionado (o enunciado pede isso explicitamente).
 - Toda imagem que não for de vocês precisa da fonte na tela. Isso vale para as fotos do dataset e para figuras de artigos.
-- Os números marcados com **[preencher]** saem do `python main.py avaliar` depois do treino com o dataset completo.
+- Os números vêm do `python main.py avaliar` com o dataset completo (treino de 26/11/2026). Se vocês treinarem de novo, confiram se mudaram.
 
 ## Divisão
 
@@ -27,7 +27,7 @@ Deixem uns 15 segundos de folga: 10 minutos é o máximo.
 
 Pontos da fala:
 - (0:00-0:30) Apresenta o grupo e a pergunta: *"Uma rede neural consegue separar bananas boas de estragadas olhando só as fotos, sem ninguém dizer qual é qual?"*
-- (0:30-0:50) Os dados: cerca de N fotos de bananas **[preencher]** do dataset *Fruits fresh and rotten for classification* (Kaggle). Deixar claro que **a rede nunca vê as pastas**. Elas só são usadas no final para conferir.
+- (0:30-0:50) Os dados: 4.736 fotos de bananas do dataset *Fruits fresh and rotten for classification* (Kaggle). Dessas, 3.154 eram cópias giradas artificialmente (com cantos pretos) e foram ignoradas, restando **1.582 fotos originais** (veja a Parte 4). Deixar claro que **a rede nunca vê as pastas**. Elas só são usadas no final para conferir.
   - Mostrar em `src/banana_cnn/dados.py` a classe `DatasetImagens`. O `__getitem__` devolve `(imagem, indice)`, sem rótulo.
 
 **Tela:** `docs/diagrama_arquitetura.png`, painel (a).
@@ -55,7 +55,7 @@ Pontos da fala:
 
 **Tela:** terminal rodando `python main.py treinar` (pode ser acelerado), depois `relatorios/curvas_autoencoder.png`.
 
-- (3:40-4:05) O erro de reconstrução cai ao longo das épocas: treino e validação **[preencher o valor final]**.
+- (3:40-4:05) O erro de reconstrução cai ao longo das épocas: o MSE na validação terminou em **0,0083** (60 épocas, 1.268 fotos de treino e 314 de validação).
 
 **Tela:** `relatorios/reconstrucoes.png`.
 
@@ -99,13 +99,16 @@ Pontos da fala:
 - (7:30-8:10) **Como avaliar sem rótulos?** Só agora usamos as pastas, depois de todo o treino.
   - **Acurácia de agrupamento:** o "grupo 0" não tem nome, então o algoritmo húngaro escolhe a melhor correspondência entre grupos e pastas antes de contar os acertos.
   - **NMI e ARI:** 0 significa o mesmo que o acaso e 1 significa grupos idênticos às pastas.
-- (8:10-8:50) **Comparação com o baseline** (preencher com os números reais):
+- (8:10-8:50) **Comparação com o baseline**:
 
   | Método | Acurácia | NMI | ARI |
   |---|---|---|---|
-  | PCA + k-means nos pixels (baseline) | [preencher] | [preencher] | [preencher] |
-  | Autoencoder + k-means no latente | [preencher] | [preencher] | [preencher] |
-  | Autoencoder + DEC | [preencher] | [preencher] | [preencher] |
+  | PCA + k-means nos pixels (baseline) | 59,3% | 0,074 | 0,029 |
+  | Autoencoder + k-means no latente | 53,8% | 0,033 | −0,002 |
+  | Autoencoder + DEC | **68,8%** | **0,136** | **0,140** |
+
+  - Pontos para comentar: o DEC foi o melhor, ficando **9,5 pontos acima do baseline**. Usar só k-means no espaço latente não bastou (53,8%). O ganho veio de o DEC **reajustar o encoder** junto com os centróides (o DEC terminou em 14 épocas).
+  - Responder sempre "imprópria" daria 58%, que é a proporção da classe maior. Por isso o NMI e o ARI ajudam: o baseline fica perto de zero e o DEC chega a 0,14. O resultado é bem melhor que o acaso, mas ainda está longe do perfeito.
 
   - **Por que neural é diferente?** O PCA é uma projeção **linear** dos pixels. O autoencoder empilha convoluções e ReLU, que é **não linear**, e reconhece uma mancha em qualquer posição da foto. O k-means só agrupa pontos fixos, enquanto o DEC **muda a própria representação** para separar os grupos.
   - Interpretem os números de verdade. Se o DEC não superar o k-means no latente, digam isso e expliquem por quê.
@@ -115,7 +118,9 @@ Pontos da fala:
 - (8:50-9:20) No espaço latente em 2D, à esquerda ficam as cores dos grupos que a rede descobriu e à direita as pastas reais. Comentem o quanto as duas figuras se parecem. Nas fotos típicas de cada grupo, o que a rede considera "parecido"?
 - **Demonstração ao vivo** (opcional, 10 s): `python main.py grupo foto_nova.jpg`, com uma foto que vocês mesmos tiraram.
 
-- (9:20-9:40) **Limitações:**
+- (9:20-9:40) **Limitações** (mostrar `relatorios/antes_filtro/fotos_por_grupo.png`):
+  - **O que aconteceu no primeiro treino:** o dataset tinha cópias giradas com triângulos pretos nos cantos. A rede separou as fotos por "tem canto preto ou não" e o resultado ficou no nível do acaso (NMI = 0). Depois de ignorar essas cópias, o DEC chegou a 68,8%. Isso mostra, na prática, que **sem rótulos a rede agrupa pelo que mais varia nas fotos**.
+  - Mesmo assim, o fundo ainda pesa: o grupo 1 é quase todo de bananas em fundo branco, e o grupo 0 tem fundos coloridos e bananas escuras.
   - Sem rótulos, a rede agrupa pelo que **mais varia** nas fotos. Se o fundo variar mais que a casca, ela pode separar "fundo branco x fundo colorido".
   - A rede não sabe o que um grupo **significa**: quem dá o nome é uma pessoa.
   - Ela vê só a aparência da casca, então não detecta banana mole ou mofo por dentro.
@@ -136,7 +141,7 @@ Pontos da fala:
 ---
 
 ## Checklist antes de gravar
-- [ ] Treinar com o dataset completo e preencher todos os **[preencher]**
+- [x] Treinar com o dataset completo (números já preenchidos)
 - [ ] Rodar `python main.py visualizar` e `interpolar` para gerar as figuras finais
 - [ ] Cada integrante aparece e fala na sua parte, de preferência com o nome na tela
 - [ ] Fonte citada em cada imagem de terceiros (fotos do dataset)

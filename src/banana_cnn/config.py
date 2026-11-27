@@ -59,6 +59,11 @@ class ConfigTreino:
     tamanho_imagem: int = 96          # precisa ser multiplo de 16 (4 reducoes pela metade)
     fracao_validacao: float = 0.2
     min_imagens: int = 20
+    # O dataset do Kaggle traz copias giradas das fotos, com triangulos pretos
+    # nos cantos. Sem rotulos, a rede agruparia por "tem canto preto ou nao"
+    # em vez da cor da casca. Com True, essas copias sao ignoradas (os
+    # arquivos nao sao apagados).
+    ignorar_cantos_pretos: bool = True
 
     # --- Autoencoder (familia a) ---
     dimensao_latente: int = 32        # tamanho do "resumo" de cada foto

@@ -206,11 +206,35 @@ class PacoteDados:
         )
 
 
+def tem_cantos_pretos(imagens: torch.Tensor, lado: int | None = None, limiar: float = 0.2) -> torch.Tensor:
+    """Detecta fotos giradas artificialmente (triangulos pretos nos cantos).
+
+    Olha os 4 cantos da imagem e mede a fracao de pixels quase pretos
+    (todos os canais < 8% do maximo). Recebe uint8 (N, 3, H, W).
+    """
+    lado = lado or max(4, imagens.shape[-1] // 8)
+    cantos = torch.cat([imagens[:, :, :lado, :lado], imagens[:, :, :lado, -lado:],
+                        imagens[:, :, -lado:, :lado], imagens[:, :, -lado:, -lado:]], dim=2)
+    quase_preto = cantos.max(dim=1).values < int(0.08 * 255)
+    return quase_preto.float().mean(dim=(1, 2)) > limiar
+
+
 def preparar_dados(caminhos: ConfigCaminhos, cfg: ConfigTreino) -> PacoteDados:
     if cfg.tamanho_imagem % 16:
         raise ValueError("tamanho_imagem precisa ser multiplo de 16.")
     rotulos = descobrir_rotulos_referencia(caminhos.dados)
     amostras = listar_amostras(caminhos.dados, rotulos)
+    imagens = carregar_tensores(amostras, cfg.tamanho_imagem, caminhos.cache) if amostras else None
+
+    if cfg.ignorar_cantos_pretos and amostras:
+        manter = ~tem_cantos_pretos(imagens)
+        removidas = int((~manter).sum())
+        if removidas:
+            logger.info("Ignorando %d copias giradas com cantos pretos (sobram %d fotos).",
+                        removidas, int(manter.sum()))
+            amostras = [a for a, m in zip(amostras, manter.tolist()) if m]
+            imagens = imagens[manter]
+
     if len(amostras) < cfg.min_imagens:
         raise DadosInsuficientesError(
             f"Sao necessarias pelo menos {cfg.min_imagens} fotos em {caminhos.dados} "
@@ -225,5 +249,4 @@ def preparar_dados(caminhos: ConfigCaminhos, cfg: ConfigTreino) -> PacoteDados:
     indices_validacao = [i for i, a in enumerate(amostras) if a.caminho in em_validacao]
 
     logger.info("Fotos: %d no treino, %d na validacao", len(treino), len(validacao))
-    imagens = carregar_tensores(amostras, cfg.tamanho_imagem, caminhos.cache)
     return PacoteDados(amostras, imagens, indices_treino, indices_validacao, rotulos)
