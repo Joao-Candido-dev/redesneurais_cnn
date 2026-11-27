@@ -2,9 +2,10 @@
 
 Exemplos:
     python main.py info
-    python main.py treinar
-    python main.py prever minha_banana.jpg
-    python main.py prever pasta_de_fotos --feedback
+    python main.py treinar          # etapa 1: autoencoder
+    python main.py agrupar          # etapa 2: Deep Embedded Clustering
+    python main.py avaliar
+    python main.py grupo minha_banana.jpg
 """
 
 import sys

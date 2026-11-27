@@ -1,45 +1,26 @@
-"""Persistencia do modelo: salvar e carregar o "cerebro" treinado."""
+"""Persistencia: salvar e carregar o autoencoder e o modelo DEC.
+
+Alem dos pesos, cada arquivo guarda o PRE-PROCESSAMENTO usado no treino
+(tamanho da imagem e recorte central). Quem carrega o modelo deve preparar as
+fotos do mesmo jeito; use `aplicar_preprocessamento` para isso.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import torch
-from torch import nn
 
-from .modelo import criar_modelo
+from .config import ConfigTreino
+from .modelo import AutoencoderConv, ModeloDEC
 
-
-@dataclass
-class ModeloCarregado:
-    modelo: nn.Module
-    classes: list[str]
-    arquitetura: str
-    tamanho_imagem: int
-    epocas_totais: int
-    metricas: dict[str, float]
+# Modelos salvos antes do recorte existir usavam a foto inteira.
+RECORTE_PADRAO_ANTIGO = 1.0
 
 
-def salvar_checkpoint(
-    caminho: Path,
-    modelo: nn.Module,
-    classes: list[str],
-    arquitetura: str,
-    tamanho_imagem: int,
-    epocas_totais: int,
-    metricas: dict[str, float],
-) -> None:
+def _gravar(caminho: Path, conteudo: dict[str, Any]) -> None:
     caminho.parent.mkdir(parents=True, exist_ok=True)
-    conteudo: dict[str, Any] = {
-        "estado_modelo": modelo.state_dict(),
-        "classes": classes,
-        "arquitetura": arquitetura,
-        "tamanho_imagem": tamanho_imagem,
-        "epocas_totais": epocas_totais,
-        "metricas": metricas,
-    }
     # Grava em arquivo temporario e depois renomeia: se o programa for
     # interrompido no meio, o modelo anterior nao fica corrompido.
     temporario = caminho.with_suffix(".tmp")
@@ -47,22 +28,54 @@ def salvar_checkpoint(
     temporario.replace(caminho)
 
 
-def carregar_checkpoint(caminho: Path, dispositivo: torch.device) -> ModeloCarregado:
+def _ler(caminho: Path, dispositivo: torch.device, comando: str) -> dict[str, Any]:
     if not caminho.exists():
-        raise FileNotFoundError(
-            f"Nenhum modelo treinado em {caminho}. Rode primeiro: python main.py treinar"
-        )
-    conteudo = torch.load(caminho, map_location=dispositivo, weights_only=True)
-    modelo = criar_modelo(
-        conteudo["arquitetura"], len(conteudo["classes"]), pretreinado=False
-    )
-    modelo.load_state_dict(conteudo["estado_modelo"])
-    modelo.to(dispositivo)
-    return ModeloCarregado(
-        modelo=modelo,
-        classes=list(conteudo["classes"]),
-        arquitetura=conteudo["arquitetura"],
-        tamanho_imagem=int(conteudo["tamanho_imagem"]),
-        epocas_totais=int(conteudo["epocas_totais"]),
-        metricas=dict(conteudo["metricas"]),
-    )
+        raise FileNotFoundError(f"Modelo nao encontrado em {caminho}. Rode antes: python main.py {comando}")
+    return torch.load(caminho, map_location=dispositivo, weights_only=True)
+
+
+def _criar_autoencoder(hp: dict[str, Any]) -> AutoencoderConv:
+    return AutoencoderConv(hp["tamanho_imagem"], hp["dimensao_latente"], tuple(hp["canais"]))
+
+
+def aplicar_preprocessamento(cfg: ConfigTreino, conteudo: dict[str, Any]) -> None:
+    """Ajusta cfg para preparar as fotos igual ao treino do modelo carregado."""
+    cfg.tamanho_imagem = int(conteudo["hiperparametros"]["tamanho_imagem"])
+    cfg.recorte_central = float(conteudo.get("recorte_central", RECORTE_PADRAO_ANTIGO))
+
+
+def salvar_autoencoder(caminho: Path, modelo: AutoencoderConv, recorte_central: float,
+                       epocas_totais: int, metricas: dict[str, float]) -> None:
+    _gravar(caminho, {
+        "estado": modelo.state_dict(),
+        "hiperparametros": modelo.hiperparametros(),
+        "recorte_central": recorte_central,
+        "epocas_totais": epocas_totais,
+        "metricas": metricas,
+    })
+
+
+def carregar_autoencoder(caminho: Path, dispositivo: torch.device) -> tuple[AutoencoderConv, dict]:
+    conteudo = _ler(caminho, dispositivo, "treinar")
+    modelo = _criar_autoencoder(conteudo["hiperparametros"])
+    modelo.load_state_dict(conteudo["estado"])
+    return modelo.to(dispositivo), conteudo
+
+
+def salvar_dec(caminho: Path, modelo: ModeloDEC, recorte_central: float, metricas: dict[str, Any]) -> None:
+    _gravar(caminho, {
+        "estado": modelo.state_dict(),
+        "hiperparametros": modelo.autoencoder.hiperparametros(),
+        "recorte_central": recorte_central,
+        "num_grupos": modelo.num_grupos,
+        "alfa": modelo.agrupamento.alfa,
+        "metricas": metricas,
+    })
+
+
+def carregar_dec(caminho: Path, dispositivo: torch.device) -> tuple[ModeloDEC, dict]:
+    conteudo = _ler(caminho, dispositivo, "agrupar")
+    modelo = ModeloDEC(_criar_autoencoder(conteudo["hiperparametros"]),
+                       int(conteudo["num_grupos"]), float(conteudo["alfa"]))
+    modelo.load_state_dict(conteudo["estado"])
+    return modelo.to(dispositivo), conteudo

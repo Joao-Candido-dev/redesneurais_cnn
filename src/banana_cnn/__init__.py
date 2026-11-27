@@ -1,3 +1,3 @@
-"""Classificador de bananas (boa ou impropria para consumo) com Rede Neural Convolucional."""
+"""Bananas boas x improprias SEM rotulos: autoencoder convolucional + Deep Embedded Clustering."""
 
-__version__ = "1.0.0"
+__version__ = "2.1.0"
